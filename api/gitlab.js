@@ -11,11 +11,11 @@ export default async function handler(req, res) {
   const token = process.env.GITLAB_TOKEN;
 
   if (!user) {
-    return res.status(400).send("Missing user");
+    return res.status(400).send("Missing user parameter");
   }
 
   try {
-    // cache for 1 hour
+    // serve from cache (1 hour)
     if (Date.now() - lastFetch < 3600000 && cache[user]) {
       return sendSVG(res, cache[user], user);
     }
@@ -26,7 +26,9 @@ export default async function handler(req, res) {
     });
 
     const gitlabUser = userRes.data[0];
-    if (!gitlabUser) throw new Error("User not found");
+    if (!gitlabUser) {
+      return res.status(404).send("User not found");
+    }
 
     // 2. get events (recent activity)
     const eventsRes = await axios.get(
@@ -38,33 +40,35 @@ export default async function handler(req, res) {
 
     const events = eventsRes.data;
 
+    // stats calculation
     let commits = 0;
-    let mergeRequests = 0;
+    let projectSet = new Set();
+    let activeDays = new Set();
 
     events.forEach((e) => {
-      if (e.action_name === "pushed to") commits++;
-      if (e.action_name === "merged") mergeRequests++;
-    });
+      if (e.action_name === "pushed to") {
+        commits++;
+        projectSet.add(e.project_id);
 
-    // 3. get projects
-    const projectsRes = await axios.get(
-      `${BASE}/users/${gitlabUser.id}/projects?per_page=100`,
-      {
-        headers: { Authorization: `Bearer ${token}` },
-      },
-    );
+        const date = new Date(e.created_at).toISOString().split("T")[0];
+
+        activeDays.add(date);
+      }
+    });
 
     const stats = {
       commits,
-      mergeRequests,
-      projects: projectsRes.data.length,
+      projects: projectSet.size,
+      activeDays: activeDays.size,
     };
 
+    // update cache
     cache[user] = stats;
     lastFetch = Date.now();
 
     return sendSVG(res, stats, user);
   } catch (err) {
+    console.error(err?.response?.data || err.message);
     return res.status(500).send("Error fetching GitLab data");
   }
 }
@@ -72,17 +76,22 @@ export default async function handler(req, res) {
 // SVG generator
 function sendSVG(res, stats, user) {
   const svg = `
-  <svg width="420" height="140" xmlns="http://www.w3.org/2000/svg">
+  <svg width="420" height="160" xmlns="http://www.w3.org/2000/svg">
     <style>
       .title { font: bold 16px sans-serif; fill: #fc6d26; }
       .text { font: 14px sans-serif; fill: #333; }
+      .label { font: 12px sans-serif; fill: #777; }
     </style>
+
+    <rect width="100%" height="100%" fill="#ffffff" rx="10" ry="10"/>
 
     <text x="20" y="30" class="title">GitLab Stats (${user})</text>
 
-    <text x="20" y="60" class="text">Commits (recent): ${stats.commits}</text>
-    <text x="20" y="85" class="text">Merge Requests: ${stats.mergeRequests}</text>
-    <text x="20" y="110" class="text">Projects: ${stats.projects}</text>
+    <text x="20" y="65" class="text">Commits (recent): ${stats.commits}</text>
+    <text x="20" y="90" class="text">Contributed Projects: ${stats.projects}</text>
+    <text x="20" y="115" class="text">Active Days: ${stats.activeDays}</text>
+
+    <text x="20" y="140" class="label">Based on recent activity (~90 days)</text>
   </svg>
   `;
 
